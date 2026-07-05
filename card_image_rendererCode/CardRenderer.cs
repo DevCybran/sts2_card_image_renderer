@@ -11,7 +11,7 @@ namespace card_image_renderer.card_image_rendererCode;
 
 public static class CardRenderer
 {
-    public static async Task RenderAllCardsAsync()
+    public static async Task RenderAllCardsAsync(Action<int, int>? onProgress = null)
     {
         List<CardModel> allCards = ModelDb.AllCards.ToList();
         for (int i = 0; i < allCards.Count; i++)
@@ -26,6 +26,7 @@ public static class CardRenderer
             {
                 MainFile.Logger.Error($"Failed to render card '{allCards[i].Id}': {e}");
             }
+            onProgress?.Invoke(i + 1, allCards.Count);
         }
     }
 

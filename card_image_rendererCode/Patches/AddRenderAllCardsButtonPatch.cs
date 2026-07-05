@@ -25,20 +25,46 @@ internal static class AddRenderAllCardsButtonPatch
             OffsetRight = 250f,
             OffsetBottom = -15f,
         };
-        button.Pressed += () => OnPressed(button);
         __instance.AddChild(button);
+
+        ProgressBar progressBar = new()
+        {
+            AnchorLeft = 0f,
+            AnchorTop = 1f,
+            AnchorRight = 0f,
+            AnchorBottom = 1f,
+            OffsetLeft = 260f,
+            OffsetTop = -60f,
+            OffsetRight = 460f,
+            OffsetBottom = -15f,
+            MinValue = 0,
+            MaxValue = 1,
+            Value = 0,
+            ShowPercentage = true,
+            Visible = false,
+        };
+        __instance.AddChild(progressBar);
+
+        button.Pressed += () => OnPressed(button, progressBar);
     }
 
-    private static async void OnPressed(Button button)
+    private static async void OnPressed(Button button, ProgressBar progressBar)
     {
         button.Disabled = true;
+        progressBar.Value = 0;
+        progressBar.Visible = true;
         try
         {
-            await CardRenderer.RenderAllCardsAsync();
+            await CardRenderer.RenderAllCardsAsync((current, total) =>
+            {
+                progressBar.MaxValue = total;
+                progressBar.Value = current;
+            });
         }
         finally
         {
             button.Disabled = false;
+            progressBar.Visible = false;
         }
     }
 }
