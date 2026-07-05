@@ -27,6 +27,9 @@ public static class CardRenderer
 
         NCard card = GD.Load<PackedScene>(CardScenePath).Instantiate<NCard>();
         viewport.AddChild(card);
+        // The card's local (0,0) is its visual center (children use negative offsets around it),
+        // so shift it to the middle of the viewport instead of the top-left corner.
+        card.Position = (Vector2)viewport.Size / 2f;
         card.Model = model;
         card.UpdateVisuals(PileType.None, CardPreviewMode.Normal);
 
