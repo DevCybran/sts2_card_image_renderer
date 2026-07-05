@@ -46,10 +46,13 @@
         <Compile Remove="materials/**"/>
         <Compile Remove="shaders/**"/>
         <Compile Remove="images/**"/>
+        <Compile Remove="Slay the Spire 2/**"/>
         <EmbeddedResource Remove="card_image_renderer/**"/>
         <EmbeddedResource Remove="materials/**"/>
         <EmbeddedResource Remove="shaders/**"/>
         <EmbeddedResource Remove="images/**"/>
+        <EmbeddedResource Remove="Slay the Spire 2/**"/>
+        <None Remove="Slay the Spire 2/**"/>
     </ItemGroup>
 
     <ItemGroup>
