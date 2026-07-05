@@ -13,13 +13,22 @@ public static class CardRenderer
     // going through the pool so we don't depend on NodePool/TestMode having been initialized yet.
     private const string CardScenePath = "res://scenes/cards/card.tscn";
 
+    // Several card elements (banners, cost badges, ancient borders, highlight glow, etc.) extend
+    // well beyond NCard.defaultSize. Rather than hand-tracking every such element's offset, we
+    // render into a generously oversized transparent viewport and let Image.GetUsedRect() (Godot's
+    // own non-transparent-pixel bounding box, used for sprite trimming) tell us the real footprint.
+    private const float OversizeFactor = 3f;
+
     public static async Task RenderCardToPngAsync(CardModel model, string outputPath)
     {
         SceneTree sceneTree = (SceneTree)Engine.GetMainLoop();
 
+        Vector2I renderSize = new(
+            (int)(NCard.defaultSize.X * OversizeFactor),
+            (int)(NCard.defaultSize.Y * OversizeFactor));
         SubViewport viewport = new()
         {
-            Size = new Vector2I((int)NCard.defaultSize.X, (int)NCard.defaultSize.Y),
+            Size = renderSize,
             TransparentBg = true,
             RenderTargetUpdateMode = SubViewport.UpdateMode.Always,
         };
@@ -38,17 +47,25 @@ public static class CardRenderer
         await sceneTree.ToSignal(sceneTree, SceneTree.SignalName.ProcessFrame);
 
         Image image = viewport.GetTexture().GetImage();
+        viewport.QueueFree();
+
+        Rect2I usedRect = image.GetUsedRect();
+        if (usedRect.Position.X <= 0 || usedRect.Position.Y <= 0
+            || usedRect.End.X >= renderSize.X || usedRect.End.Y >= renderSize.Y)
+        {
+            MainFile.Logger.Warn($"Card render for '{model.Id}' touched the edge of the {renderSize} render target; output may be clipped. Consider increasing OversizeFactor.");
+        }
+        Image cropped = image.GetRegion(usedRect);
+
         string absolutePath = ProjectSettings.GlobalizePath(outputPath);
         DirAccess.MakeDirRecursiveAbsolute(outputPath.GetBaseDir());
-        Error error = image.SavePng(outputPath);
-
-        viewport.QueueFree();
+        Error error = cropped.SavePng(outputPath);
 
         if (error != Error.Ok)
         {
             throw new InvalidOperationException($"Failed to save card render to '{absolutePath}': {error}");
         }
 
-        MainFile.Logger.Info($"Rendered card '{model.Id}' to '{absolutePath}'.");
+        MainFile.Logger.Info($"Rendered card '{model.Id}' ({usedRect.Size}) to '{absolutePath}'.");
     }
 }
