@@ -36,6 +36,7 @@ public static class CardRenderer
 
         Image image = viewport.GetTexture().GetImage();
         string absolutePath = ProjectSettings.GlobalizePath(outputPath);
+        DirAccess.MakeDirRecursiveAbsolute(outputPath.GetBaseDir());
         Error error = image.SavePng(outputPath);
 
         viewport.QueueFree();
