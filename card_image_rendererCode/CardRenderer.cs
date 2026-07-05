@@ -22,7 +22,7 @@ public static class CardRenderer
     // own non-transparent-pixel bounding box, used for sprite trimming) tell us the real footprint.
     private const float OversizeFactor = 3f;
 
-    public static async Task RenderCardToPngAsync(CardModel model, string outputPath)
+    public static async Task RenderCardToPngAsync(CardModel model, string outputPath, int cardNumber, int totalCards)
     {
         SceneTree sceneTree = (SceneTree)Engine.GetMainLoop();
 
@@ -72,6 +72,10 @@ public static class CardRenderer
             throw new InvalidOperationException($"Failed to save card render to '{absolutePath}': {error}");
         }
 
-        MainFile.Logger.Info($"Rendered card '{model.Id}' ({usedRect.Size}) to '{absolutePath}'.");
+        int digits = totalCards.ToString().Length;
+        string paddedCardNumber = cardNumber.ToString().PadLeft(digits, '0');
+        string paddedTotalCards = totalCards.ToString().PadLeft(digits, '0');
+        double progressPercent = cardNumber / (double)totalCards * 100;
+        MainFile.Logger.Info($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] ({paddedCardNumber}/{paddedTotalCards}, {progressPercent:F1}%) Rendered card '{model.Id}' ({usedRect.Size}) to '{absolutePath}'.");
     }
 }

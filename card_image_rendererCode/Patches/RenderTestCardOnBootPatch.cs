@@ -26,13 +26,13 @@ internal static class RenderTestCardOnBootPatch
 
     private static async void RenderTestCardsAsync()
     {
-        foreach (Func<CardModel> getCard in TestCards)
+        for (int i = 0; i < TestCards.Length; i++)
         {
             try
             {
-                CardModel card = getCard().ToMutable();
+                CardModel card = TestCards[i]().ToMutable();
                 string fileName = card.Id.Entry.ToLowerInvariant();
-                await CardRenderer.RenderCardToPngAsync(card, $"user://card_image_renderer/{fileName}.png");
+                await CardRenderer.RenderCardToPngAsync(card, $"user://card_image_renderer/{fileName}.png", i + 1, TestCards.Length);
             }
             catch (Exception e)
             {
