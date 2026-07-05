@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using Godot;
 using MegaCrit.Sts2.Core.Entities.Cards;
@@ -9,6 +11,24 @@ namespace card_image_renderer.card_image_rendererCode;
 
 public static class CardRenderer
 {
+    public static async Task RenderAllCardsAsync()
+    {
+        List<CardModel> allCards = ModelDb.AllCards.ToList();
+        for (int i = 0; i < allCards.Count; i++)
+        {
+            try
+            {
+                CardModel card = allCards[i].ToMutable();
+                string fileName = card.Id.Entry.ToLowerInvariant();
+                await RenderCardToPngAsync(card, $"user://card_image_renderer/{fileName}.png", i + 1, allCards.Count);
+            }
+            catch (Exception e)
+            {
+                MainFile.Logger.Error($"Failed to render card '{allCards[i].Id}': {e}");
+            }
+        }
+    }
+
     // Same scene NCard.Create() pulls from its NodePool; we instantiate it directly instead of
     // going through the pool so we don't depend on NodePool/TestMode having been initialized yet.
     private const string CardScenePath = "res://scenes/cards/card.tscn";
