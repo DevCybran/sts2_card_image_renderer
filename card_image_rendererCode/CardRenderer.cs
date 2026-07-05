@@ -13,6 +13,9 @@ public static class CardRenderer
     // going through the pool so we don't depend on NodePool/TestMode having been initialized yet.
     private const string CardScenePath = "res://scenes/cards/card.tscn";
 
+    // Renders at this multiple of NCard.defaultSize for higher-resolution output.
+    private const float RenderScale = 5f;
+
     // Several card elements (banners, cost badges, ancient borders, highlight glow, etc.) extend
     // well beyond NCard.defaultSize. Rather than hand-tracking every such element's offset, we
     // render into a generously oversized transparent viewport and let Image.GetUsedRect() (Godot's
@@ -23,9 +26,10 @@ public static class CardRenderer
     {
         SceneTree sceneTree = (SceneTree)Engine.GetMainLoop();
 
+        Vector2 scaledCardSize = NCard.defaultSize * RenderScale;
         Vector2I renderSize = new(
-            (int)(NCard.defaultSize.X * OversizeFactor),
-            (int)(NCard.defaultSize.Y * OversizeFactor));
+            (int)(scaledCardSize.X * OversizeFactor),
+            (int)(scaledCardSize.Y * OversizeFactor));
         SubViewport viewport = new()
         {
             Size = renderSize,
@@ -36,8 +40,10 @@ public static class CardRenderer
 
         NCard card = GD.Load<PackedScene>(CardScenePath).Instantiate<NCard>();
         viewport.AddChild(card);
+        card.Scale = Vector2.One * RenderScale;
         // The card's local (0,0) is its visual center (children use negative offsets around it),
-        // so shift it to the middle of the viewport instead of the top-left corner.
+        // so shift it to the middle of the viewport instead of the top-left corner. Position isn't
+        // affected by Scale since it's anchored at the card's default PivotOffset of (0,0).
         card.Position = (Vector2)viewport.Size / 2f;
         card.Model = model;
         card.UpdateVisuals(PileType.None, CardPreviewMode.Normal);
