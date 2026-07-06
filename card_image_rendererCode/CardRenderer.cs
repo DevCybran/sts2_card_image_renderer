@@ -11,22 +11,60 @@ namespace card_image_renderer.card_image_rendererCode;
 
 public static class CardRenderer
 {
-    public static async Task RenderAllCardsAsync(Action<int, int>? onProgress = null)
+    public static async Task RenderCardsAsync(bool renderBaseCards, bool renderUpgradedCards, Action<int, int>? onProgress = null)
     {
         List<CardModel> allCards = ModelDb.AllCards.ToList();
-        for (int i = 0; i < allCards.Count; i++)
+        int totalOperations = allCards.Count * ((renderBaseCards ? 1 : 0) + (renderUpgradedCards ? 1 : 0));
+        int completed = 0;
+
+        if (renderBaseCards)
         {
-            try
+            foreach (CardModel canonicalCard in allCards)
             {
-                CardModel card = allCards[i].ToMutable();
-                string fileName = card.Id.Entry.ToLowerInvariant();
-                await RenderCardToPngAsync(card, $"user://card_image_renderer/{fileName}.png", i + 1, allCards.Count);
+                completed++;
+                try
+                {
+                    CardModel card = canonicalCard.ToMutable();
+                    string fileName = card.Id.Entry.ToLowerInvariant();
+                    await RenderCardToPngAsync(card, $"user://card_image_renderer/{fileName}.png", completed, totalOperations);
+                }
+                catch (Exception e)
+                {
+                    MainFile.Logger.Error($"Failed to render card '{canonicalCard.Id}': {e}");
+                }
+                onProgress?.Invoke(completed, totalOperations);
             }
-            catch (Exception e)
+        }
+
+        if (renderUpgradedCards)
+        {
+            foreach (CardModel canonicalCard in allCards)
             {
-                MainFile.Logger.Error($"Failed to render card '{allCards[i].Id}': {e}");
+                completed++;
+                try
+                {
+                    CardModel card = canonicalCard.ToMutable();
+                    if (!card.IsUpgradable)
+                    {
+                        MainFile.Logger.Warn($"Skipping upgraded render for '{card.Id}': card is not upgradable.");
+                    }
+                    else
+                    {
+                        // Actually upgrades the model (not just an upgrade *preview*, see
+                        // NInspectCardScreen/UpdateCardDisplay), same pairing CardModel.FromSerializable
+                        // uses to restore an upgraded card from a save.
+                        card.UpgradeInternal();
+                        card.FinalizeUpgradeInternal();
+                        string fileName = card.Id.Entry.ToLowerInvariant();
+                        await RenderCardToPngAsync(card, $"user://card_image_renderer/{fileName}_upgraded.png", completed, totalOperations);
+                    }
+                }
+                catch (Exception e)
+                {
+                    MainFile.Logger.Error($"Failed to render upgraded card '{canonicalCard.Id}': {e}");
+                }
+                onProgress?.Invoke(completed, totalOperations);
             }
-            onProgress?.Invoke(i + 1, allCards.Count);
         }
     }
 

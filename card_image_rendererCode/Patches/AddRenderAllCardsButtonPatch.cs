@@ -92,18 +92,11 @@ internal static class AddRenderAllCardsButtonPatch
         progressBar.Visible = true;
         try
         {
-            if (renderBaseCards)
+            await CardRenderer.RenderCardsAsync(renderBaseCards, renderUpgradedCards, (current, total) =>
             {
-                await CardRenderer.RenderAllCardsAsync((current, total) =>
-                {
-                    progressBar.MaxValue = total;
-                    progressBar.Value = current;
-                });
-            }
-            if (renderUpgradedCards)
-            {
-                // TODO: render upgraded card variants. No-op for now.
-            }
+                progressBar.MaxValue = total;
+                progressBar.Value = current;
+            });
         }
         finally
         {
