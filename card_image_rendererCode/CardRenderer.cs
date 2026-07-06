@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Godot;
 using MegaCrit.Sts2.Core.Entities.Cards;
@@ -13,6 +14,13 @@ namespace card_image_renderer.card_image_rendererCode;
 
 public static class CardRenderer
 {
+    // Crop + PNG encode + disk write take far longer than capturing the render (per-phase timing
+    // showed ~90% of per-card time in crop+save), and neither touches the shared viewport/card once
+    // we have the captured Image - so they run in the background instead of blocking the main render
+    // loop. Bounded to this many in-flight cards at once, so we don't hold an unbounded number of
+    // captured-but-unsaved Images (tens of MB each) in memory if saving lags behind capturing.
+    private const int MaxConcurrentSaves = 16;
+
     public static async Task RenderCardsAsync(bool renderBaseCards, bool renderUpgradedCards, Action<int, int>? onProgress = null)
     {
         List<CardModel> allCards = ModelDb.AllCards.ToList();
@@ -24,6 +32,8 @@ public static class CardRenderer
         // hundreds of times in a tight loop outpaces the engine's deferred GPU cleanup, ballooning
         // memory usage over the course of a full run.
         (SubViewport viewport, NCard card) = CreateRenderRig();
+        using SemaphoreSlim saveThrottle = new(MaxConcurrentSaves, MaxConcurrentSaves);
+        List<Task> pendingSaves = new();
         try
         {
             if (renderBaseCards)
@@ -35,7 +45,7 @@ public static class CardRenderer
                     {
                         CardModel cardModel = canonicalCard.ToMutable();
                         string fileName = cardModel.Id.Entry.ToLowerInvariant();
-                        await RenderCardToPngAsync(viewport, card, cardModel, $"user://card_image_renderer/{fileName}.png", completed, totalOperations);
+                        await QueueRenderAsync(viewport, card, saveThrottle, pendingSaves, cardModel, $"user://card_image_renderer/{fileName}.png", completed, totalOperations);
                     }
                     catch (Exception e)
                     {
@@ -65,7 +75,7 @@ public static class CardRenderer
                             cardModel.UpgradeInternal();
                             cardModel.FinalizeUpgradeInternal();
                             string fileName = cardModel.Id.Entry.ToLowerInvariant();
-                            await RenderCardToPngAsync(viewport, card, cardModel, $"user://card_image_renderer/{fileName}_upgraded.png", completed, totalOperations);
+                            await QueueRenderAsync(viewport, card, saveThrottle, pendingSaves, cardModel, $"user://card_image_renderer/{fileName}_upgraded.png", completed, totalOperations);
                         }
                     }
                     catch (Exception e)
@@ -75,6 +85,8 @@ public static class CardRenderer
                     onProgress?.Invoke(completed, totalOperations);
                 }
             }
+
+            await Task.WhenAll(pendingSaves);
         }
         finally
         {
@@ -122,12 +134,32 @@ public static class CardRenderer
         return (viewport, card);
     }
 
-    private static async Task RenderCardToPngAsync(SubViewport viewport, NCard card, CardModel model, string outputPath, int cardNumber, int totalCards)
+    // Acquires a save slot, captures the card on the shared viewport/card (must happen one at a time
+    // on the main thread), then hands the resulting Image off to a background crop+save task without
+    // awaiting it - the caller's loop can move straight on to the next card's capture.
+    private static async Task QueueRenderAsync(SubViewport viewport, NCard card, SemaphoreSlim saveThrottle, List<Task> pendingSaves, CardModel model, string outputPath, int cardNumber, int totalCards)
+    {
+        await saveThrottle.WaitAsync();
+
+        Image image;
+        Vector2I renderSize;
+        long setupMs, waitMs, readbackMs;
+        try
+        {
+            (image, renderSize, setupMs, waitMs, readbackMs) = await CaptureCardAsync(viewport, card, model);
+        }
+        catch
+        {
+            saveThrottle.Release();
+            throw;
+        }
+
+        pendingSaves.Add(CropAndSaveAsync(saveThrottle, image, renderSize, model, outputPath, cardNumber, totalCards, setupMs, waitMs, readbackMs));
+    }
+
+    private static async Task<(Image Image, Vector2I RenderSize, long SetupMs, long WaitMs, long ReadbackMs)> CaptureCardAsync(SubViewport viewport, NCard card, CardModel model)
     {
         SceneTree sceneTree = (SceneTree)Engine.GetMainLoop();
-
-        // Temporary instrumentation to find out which phase actually dominates render time before
-        // optimizing anything - remove once we know.
         Stopwatch stopwatch = Stopwatch.StartNew();
 
         card.Model = model;
@@ -140,43 +172,64 @@ public static class CardRenderer
         await sceneTree.ToSignal(sceneTree, SceneTree.SignalName.ProcessFrame);
         long afterWaitMs = stopwatch.ElapsedMilliseconds;
 
-        // Image wraps a large *native* pixel buffer (tens of MB at our render size) behind a small
-        // managed wrapper object, so the .NET GC has no visibility into how much memory is actually
-        // at stake and won't collect these promptly on its own. Across hundreds of cards, waiting for
-        // GC/finalizers to catch up let native memory balloon far faster than it was reclaimed, so we
-        // explicitly dispose both images as soon as we're done with them instead.
-        using Image image = viewport.GetTexture().GetImage();
+        Image image = viewport.GetTexture().GetImage();
         long afterReadbackMs = stopwatch.ElapsedMilliseconds;
 
-        Rect2I usedRect = image.GetUsedRect();
-        Vector2I renderSize = viewport.Size;
-        if (usedRect.Position.X <= 0 || usedRect.Position.Y <= 0
-            || usedRect.End.X >= renderSize.X || usedRect.End.Y >= renderSize.Y)
+        return (image, viewport.Size, setupMs, afterWaitMs - setupMs, afterReadbackMs - afterWaitMs);
+    }
+
+    // Runs on a background thread pool task. Image/DirAccess/ProjectSettings only touch their own
+    // data (no scene tree/RenderingServer access), which is why this is safe to run off the main
+    // thread - unlike anything that touches viewport/card, which must stay on the main thread.
+    private static async Task CropAndSaveAsync(SemaphoreSlim saveThrottle, Image image, Vector2I renderSize, CardModel model, string outputPath, int cardNumber, int totalCards, long setupMs, long waitMs, long readbackMs)
+    {
+        try
         {
-            MainFile.Logger.Warn($"Card render for '{model.Id}' touched the edge of the {renderSize} render target; output may be clipped. Consider increasing OversizeFactor.");
+            await Task.Run(() =>
+            {
+                // Image wraps a large *native* pixel buffer (tens of MB at our render size) behind a
+                // small managed wrapper object, so the .NET GC has no visibility into how much memory
+                // is actually at stake and won't collect these promptly on its own. Across hundreds of
+                // cards, waiting for GC/finalizers to catch up let native memory balloon far faster
+                // than it was reclaimed, so we explicitly dispose both images as soon as we're done.
+                using Image disposableImage = image;
+                Stopwatch stopwatch = Stopwatch.StartNew();
+
+                Rect2I usedRect = disposableImage.GetUsedRect();
+                if (usedRect.Position.X <= 0 || usedRect.Position.Y <= 0
+                    || usedRect.End.X >= renderSize.X || usedRect.End.Y >= renderSize.Y)
+                {
+                    MainFile.Logger.Warn($"Card render for '{model.Id}' touched the edge of the {renderSize} render target; output may be clipped. Consider increasing OversizeFactor.");
+                }
+                using Image cropped = disposableImage.GetRegion(usedRect);
+                long cropMs = stopwatch.ElapsedMilliseconds;
+
+                string absolutePath = ProjectSettings.GlobalizePath(outputPath);
+                DirAccess.MakeDirRecursiveAbsolute(outputPath.GetBaseDir());
+                Error error = cropped.SavePng(outputPath);
+                long saveMs = stopwatch.ElapsedMilliseconds - cropMs;
+
+                if (error != Error.Ok)
+                {
+                    throw new InvalidOperationException($"Failed to save card render to '{absolutePath}': {error}");
+                }
+
+                int digits = totalCards.ToString().Length;
+                string paddedCardNumber = cardNumber.ToString().PadLeft(digits, '0');
+                string paddedTotalCards = totalCards.ToString().PadLeft(digits, '0');
+                double progressPercent = cardNumber / (double)totalCards * 100;
+                long totalMs = setupMs + waitMs + readbackMs + cropMs + saveMs;
+                MainFile.Logger.Info($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] ({paddedCardNumber}/{paddedTotalCards}, {progressPercent:F1}%) Rendered card '{model.Id}' ({usedRect.Size}) to '{absolutePath}' [setup={setupMs}ms wait={waitMs}ms readback={readbackMs}ms crop={cropMs}ms save={saveMs}ms total={totalMs}ms].");
+            });
         }
-        using Image cropped = image.GetRegion(usedRect);
-        long afterCropMs = stopwatch.ElapsedMilliseconds;
-
-        string absolutePath = ProjectSettings.GlobalizePath(outputPath);
-        DirAccess.MakeDirRecursiveAbsolute(outputPath.GetBaseDir());
-        Error error = cropped.SavePng(outputPath);
-        long afterSaveMs = stopwatch.ElapsedMilliseconds;
-
-        if (error != Error.Ok)
+        catch (Exception e)
         {
-            throw new InvalidOperationException($"Failed to save card render to '{absolutePath}': {error}");
+            MainFile.Logger.Error($"Failed to crop/save card '{model.Id}': {e}");
         }
-
-        int digits = totalCards.ToString().Length;
-        string paddedCardNumber = cardNumber.ToString().PadLeft(digits, '0');
-        string paddedTotalCards = totalCards.ToString().PadLeft(digits, '0');
-        double progressPercent = cardNumber / (double)totalCards * 100;
-        long waitMs = afterWaitMs - setupMs;
-        long readbackMs = afterReadbackMs - afterWaitMs;
-        long cropMs = afterCropMs - afterReadbackMs;
-        long saveMs = afterSaveMs - afterCropMs;
-        MainFile.Logger.Info($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] ({paddedCardNumber}/{paddedTotalCards}, {progressPercent:F1}%) Rendered card '{model.Id}' ({usedRect.Size}) to '{absolutePath}' [setup={setupMs}ms wait={waitMs}ms readback={readbackMs}ms crop={cropMs}ms save={saveMs}ms total={afterSaveMs}ms].");
+        finally
+        {
+            saveThrottle.Release();
+        }
     }
 
     // CardModel.Portrait loads from the runtime texture atlas (e.g. 250x190 for Bash), which is
