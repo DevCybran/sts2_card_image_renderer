@@ -4,10 +4,11 @@ using MegaCrit.Sts2.Core.Nodes.Screens.MainMenu;
 
 namespace card_image_renderer.card_image_rendererCode.Patches;
 
-// Adds a plain debug button to the main menu that triggers rendering every card in the game.
-// Uses a vanilla Godot Button rather than NMainMenuTextButton/the MainMenuTextButtons VBoxContainer,
-// since that button type expects a specific internal child structure (a MegaLabel at child index 0,
-// focus/reticle wiring, etc.) that isn't worth replicating for a debug trigger.
+// Adds a plain debug button to the main menu that opens an options dialog for rendering cards.
+// Uses vanilla Godot controls (Button/ConfirmationDialog/CheckBox) rather than the game's own
+// NMainMenuTextButton/NModalContainer conventions, since those expect internal structure (a
+// MegaLabel child, IScreenContext, backstop wiring, etc.) that isn't worth replicating for a
+// debug trigger.
 [HarmonyPatch(typeof(NMainMenu), nameof(NMainMenu._Ready))]
 internal static class AddRenderAllCardsButtonPatch
 {
@@ -45,21 +46,64 @@ internal static class AddRenderAllCardsButtonPatch
         };
         __instance.AddChild(progressBar);
 
-        button.Pressed += () => OnPressed(button, progressBar);
+        button.Pressed += () => OpenOptionsDialog(__instance, button, progressBar);
     }
 
-    private static async void OnPressed(Button button, ProgressBar progressBar)
+    private static void OpenOptionsDialog(NMainMenu mainMenu, Button button, ProgressBar progressBar)
+    {
+        // AcceptDialog's DialogText label isn't part of the same layout as children added via
+        // AddChild() - they don't stack automatically, they'd overlap. So we leave DialogText empty
+        // and build the entire prompt + checkboxes ourselves in one VBoxContainer instead.
+        ConfirmationDialog dialog = new()
+        {
+            Title = "Render Cards",
+            Size = new Vector2I(360, 260),
+        };
+
+        Label promptLabel = new() { Text = "Select which cards to render:" };
+        CheckBox baseCardsCheckbox = new() { Text = "Unupgraded (base) cards", ButtonPressed = true };
+        CheckBox upgradedCardsCheckbox = new() { Text = "Upgraded cards", ButtonPressed = false };
+        VBoxContainer optionsBox = new()
+        {
+            Position = new Vector2(20f, 50f),
+        };
+        optionsBox.AddChild(promptLabel);
+        optionsBox.AddChild(baseCardsCheckbox);
+        optionsBox.AddChild(upgradedCardsCheckbox);
+        dialog.AddChild(optionsBox);
+
+        dialog.Confirmed += () => OnRenderConfirmed(button, progressBar, baseCardsCheckbox.ButtonPressed, upgradedCardsCheckbox.ButtonPressed);
+        dialog.VisibilityChanged += () =>
+        {
+            if (!dialog.Visible)
+            {
+                dialog.QueueFree();
+            }
+        };
+
+        mainMenu.AddChild(dialog);
+        dialog.PopupCentered();
+    }
+
+    private static async void OnRenderConfirmed(Button button, ProgressBar progressBar, bool renderBaseCards, bool renderUpgradedCards)
     {
         button.Disabled = true;
         progressBar.Value = 0;
         progressBar.Visible = true;
         try
         {
-            await CardRenderer.RenderAllCardsAsync((current, total) =>
+            if (renderBaseCards)
             {
-                progressBar.MaxValue = total;
-                progressBar.Value = current;
-            });
+                await CardRenderer.RenderAllCardsAsync((current, total) =>
+                {
+                    progressBar.MaxValue = total;
+                    progressBar.Value = current;
+                });
+            }
+            if (renderUpgradedCards)
+            {
+                // TODO: render upgraded card variants. No-op for now.
+            }
         }
         finally
         {
