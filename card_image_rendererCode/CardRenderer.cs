@@ -18,54 +18,66 @@ public static class CardRenderer
         int totalOperations = allCards.Count * ((renderBaseCards ? 1 : 0) + (renderUpgradedCards ? 1 : 0));
         int completed = 0;
 
-        if (renderBaseCards)
+        // Reused across the whole batch instead of being created and QueueFree()'d per card: each
+        // render target is tens of millions of pixels, and repeatedly allocating/tearing one down
+        // hundreds of times in a tight loop outpaces the engine's deferred GPU cleanup, ballooning
+        // memory usage over the course of a full run.
+        (SubViewport viewport, NCard card) = CreateRenderRig();
+        try
         {
-            foreach (CardModel canonicalCard in allCards)
+            if (renderBaseCards)
             {
-                completed++;
-                try
+                foreach (CardModel canonicalCard in allCards)
                 {
-                    CardModel card = canonicalCard.ToMutable();
-                    string fileName = card.Id.Entry.ToLowerInvariant();
-                    await RenderCardToPngAsync(card, $"user://card_image_renderer/{fileName}.png", completed, totalOperations);
+                    completed++;
+                    try
+                    {
+                        CardModel cardModel = canonicalCard.ToMutable();
+                        string fileName = cardModel.Id.Entry.ToLowerInvariant();
+                        await RenderCardToPngAsync(viewport, card, cardModel, $"user://card_image_renderer/{fileName}.png", completed, totalOperations);
+                    }
+                    catch (Exception e)
+                    {
+                        MainFile.Logger.Error($"Failed to render card '{canonicalCard.Id}': {e}");
+                    }
+                    onProgress?.Invoke(completed, totalOperations);
                 }
-                catch (Exception e)
+            }
+
+            if (renderUpgradedCards)
+            {
+                foreach (CardModel canonicalCard in allCards)
                 {
-                    MainFile.Logger.Error($"Failed to render card '{canonicalCard.Id}': {e}");
+                    completed++;
+                    try
+                    {
+                        CardModel cardModel = canonicalCard.ToMutable();
+                        if (!cardModel.IsUpgradable)
+                        {
+                            MainFile.Logger.Warn($"Skipping upgraded render for '{cardModel.Id}': card is not upgradable.");
+                        }
+                        else
+                        {
+                            // Actually upgrades the model (not just an upgrade *preview*, see
+                            // NInspectCardScreen/UpdateCardDisplay), same pairing CardModel.FromSerializable
+                            // uses to restore an upgraded card from a save.
+                            cardModel.UpgradeInternal();
+                            cardModel.FinalizeUpgradeInternal();
+                            string fileName = cardModel.Id.Entry.ToLowerInvariant();
+                            await RenderCardToPngAsync(viewport, card, cardModel, $"user://card_image_renderer/{fileName}_upgraded.png", completed, totalOperations);
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        MainFile.Logger.Error($"Failed to render upgraded card '{canonicalCard.Id}': {e}");
+                    }
+                    onProgress?.Invoke(completed, totalOperations);
                 }
-                onProgress?.Invoke(completed, totalOperations);
             }
         }
-
-        if (renderUpgradedCards)
+        finally
         {
-            foreach (CardModel canonicalCard in allCards)
-            {
-                completed++;
-                try
-                {
-                    CardModel card = canonicalCard.ToMutable();
-                    if (!card.IsUpgradable)
-                    {
-                        MainFile.Logger.Warn($"Skipping upgraded render for '{card.Id}': card is not upgradable.");
-                    }
-                    else
-                    {
-                        // Actually upgrades the model (not just an upgrade *preview*, see
-                        // NInspectCardScreen/UpdateCardDisplay), same pairing CardModel.FromSerializable
-                        // uses to restore an upgraded card from a save.
-                        card.UpgradeInternal();
-                        card.FinalizeUpgradeInternal();
-                        string fileName = card.Id.Entry.ToLowerInvariant();
-                        await RenderCardToPngAsync(card, $"user://card_image_renderer/{fileName}_upgraded.png", completed, totalOperations);
-                    }
-                }
-                catch (Exception e)
-                {
-                    MainFile.Logger.Error($"Failed to render upgraded card '{canonicalCard.Id}': {e}");
-                }
-                onProgress?.Invoke(completed, totalOperations);
-            }
+            viewport.QueueFree();
         }
     }
 
@@ -82,7 +94,7 @@ public static class CardRenderer
     // own non-transparent-pixel bounding box, used for sprite trimming) tell us the real footprint.
     private const float OversizeFactor = 3f;
 
-    public static async Task RenderCardToPngAsync(CardModel model, string outputPath, int cardNumber, int totalCards)
+    private static (SubViewport, NCard) CreateRenderRig()
     {
         SceneTree sceneTree = (SceneTree)Engine.GetMainLoop();
 
@@ -105,6 +117,14 @@ public static class CardRenderer
         // so shift it to the middle of the viewport instead of the top-left corner. Position isn't
         // affected by Scale since it's anchored at the card's default PivotOffset of (0,0).
         card.Position = (Vector2)viewport.Size / 2f;
+
+        return (viewport, card);
+    }
+
+    private static async Task RenderCardToPngAsync(SubViewport viewport, NCard card, CardModel model, string outputPath, int cardNumber, int totalCards)
+    {
+        SceneTree sceneTree = (SceneTree)Engine.GetMainLoop();
+
         card.Model = model;
         card.UpdateVisuals(PileType.None, CardPreviewMode.Normal);
         ReplaceWithHighResPortrait(card, model);
@@ -113,16 +133,21 @@ public static class CardRenderer
         await sceneTree.ToSignal(sceneTree, SceneTree.SignalName.ProcessFrame);
         await sceneTree.ToSignal(sceneTree, SceneTree.SignalName.ProcessFrame);
 
-        Image image = viewport.GetTexture().GetImage();
-        viewport.QueueFree();
+        // Image wraps a large *native* pixel buffer (tens of MB at our render size) behind a small
+        // managed wrapper object, so the .NET GC has no visibility into how much memory is actually
+        // at stake and won't collect these promptly on its own. Across hundreds of cards, waiting for
+        // GC/finalizers to catch up let native memory balloon far faster than it was reclaimed, so we
+        // explicitly dispose both images as soon as we're done with them instead.
+        using Image image = viewport.GetTexture().GetImage();
 
         Rect2I usedRect = image.GetUsedRect();
+        Vector2I renderSize = viewport.Size;
         if (usedRect.Position.X <= 0 || usedRect.Position.Y <= 0
             || usedRect.End.X >= renderSize.X || usedRect.End.Y >= renderSize.Y)
         {
             MainFile.Logger.Warn($"Card render for '{model.Id}' touched the edge of the {renderSize} render target; output may be clipped. Consider increasing OversizeFactor.");
         }
-        Image cropped = image.GetRegion(usedRect);
+        using Image cropped = image.GetRegion(usedRect);
 
         string absolutePath = ProjectSettings.GlobalizePath(outputPath);
         DirAccess.MakeDirRecursiveAbsolute(outputPath.GetBaseDir());
