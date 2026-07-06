@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using Godot;
 using MegaCrit.Sts2.Core.Entities.Cards;
+using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Nodes.Cards;
 
@@ -106,6 +107,7 @@ public static class CardRenderer
         card.Position = (Vector2)viewport.Size / 2f;
         card.Model = model;
         card.UpdateVisuals(PileType.None, CardPreviewMode.Normal);
+        ReplaceWithHighResPortrait(card, model);
 
         // The viewport needs at least one render pass before its texture has real content.
         await sceneTree.ToSignal(sceneTree, SceneTree.SignalName.ProcessFrame);
@@ -136,5 +138,28 @@ public static class CardRenderer
         string paddedTotalCards = totalCards.ToString().PadLeft(digits, '0');
         double progressPercent = cardNumber / (double)totalCards * 100;
         MainFile.Logger.Info($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] ({paddedCardNumber}/{paddedTotalCards}, {progressPercent:F1}%) Rendered card '{model.Id}' ({usedRect.Size}) to '{absolutePath}'.");
+    }
+
+    // CardModel.Portrait loads from the runtime texture atlas (e.g. 250x190 for Bash), which is
+    // downsampled from the original art for VRAM efficiency - fine at gameplay scale, but blurry once
+    // we scale the card up 5x. The original full-resolution art still exists on disk uncompressed
+    // (e.g. 1000x760 for Bash) at "packed/card_portraits/{pool}/{entry}.png"; CardModel.PortraitPngPath
+    // computes that same path internally but is private, so we reconstruct it here instead.
+    private static void ReplaceWithHighResPortrait(NCard card, CardModel model)
+    {
+        if (!model.HasPortrait)
+        {
+            return;
+        }
+
+        string highResPath = ImageHelper.GetImagePath($"packed/card_portraits/{model.Pool.Title.ToLowerInvariant()}/{model.Id.Entry.ToLowerInvariant()}.png");
+        if (!ResourceLoader.Exists(highResPath))
+        {
+            return;
+        }
+
+        Texture2D highResPortrait = ResourceLoader.Load<Texture2D>(highResPath, null, ResourceLoader.CacheMode.Reuse);
+        string portraitNodePath = model.Rarity == CardRarity.Ancient ? "%AncientPortrait" : "%Portrait";
+        card.GetNode<TextureRect>(portraitNodePath).Texture = highResPortrait;
     }
 }
