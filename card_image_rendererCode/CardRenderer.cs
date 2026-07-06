@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading.Tasks;
 using Godot;
@@ -125,13 +126,19 @@ public static class CardRenderer
     {
         SceneTree sceneTree = (SceneTree)Engine.GetMainLoop();
 
+        // Temporary instrumentation to find out which phase actually dominates render time before
+        // optimizing anything - remove once we know.
+        Stopwatch stopwatch = Stopwatch.StartNew();
+
         card.Model = model;
         card.UpdateVisuals(PileType.None, CardPreviewMode.Normal);
         ReplaceWithHighResPortrait(card, model);
+        long setupMs = stopwatch.ElapsedMilliseconds;
 
         // The viewport needs at least one render pass before its texture has real content.
         await sceneTree.ToSignal(sceneTree, SceneTree.SignalName.ProcessFrame);
         await sceneTree.ToSignal(sceneTree, SceneTree.SignalName.ProcessFrame);
+        long afterWaitMs = stopwatch.ElapsedMilliseconds;
 
         // Image wraps a large *native* pixel buffer (tens of MB at our render size) behind a small
         // managed wrapper object, so the .NET GC has no visibility into how much memory is actually
@@ -139,6 +146,7 @@ public static class CardRenderer
         // GC/finalizers to catch up let native memory balloon far faster than it was reclaimed, so we
         // explicitly dispose both images as soon as we're done with them instead.
         using Image image = viewport.GetTexture().GetImage();
+        long afterReadbackMs = stopwatch.ElapsedMilliseconds;
 
         Rect2I usedRect = image.GetUsedRect();
         Vector2I renderSize = viewport.Size;
@@ -148,10 +156,12 @@ public static class CardRenderer
             MainFile.Logger.Warn($"Card render for '{model.Id}' touched the edge of the {renderSize} render target; output may be clipped. Consider increasing OversizeFactor.");
         }
         using Image cropped = image.GetRegion(usedRect);
+        long afterCropMs = stopwatch.ElapsedMilliseconds;
 
         string absolutePath = ProjectSettings.GlobalizePath(outputPath);
         DirAccess.MakeDirRecursiveAbsolute(outputPath.GetBaseDir());
         Error error = cropped.SavePng(outputPath);
+        long afterSaveMs = stopwatch.ElapsedMilliseconds;
 
         if (error != Error.Ok)
         {
@@ -162,7 +172,11 @@ public static class CardRenderer
         string paddedCardNumber = cardNumber.ToString().PadLeft(digits, '0');
         string paddedTotalCards = totalCards.ToString().PadLeft(digits, '0');
         double progressPercent = cardNumber / (double)totalCards * 100;
-        MainFile.Logger.Info($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] ({paddedCardNumber}/{paddedTotalCards}, {progressPercent:F1}%) Rendered card '{model.Id}' ({usedRect.Size}) to '{absolutePath}'.");
+        long waitMs = afterWaitMs - setupMs;
+        long readbackMs = afterReadbackMs - afterWaitMs;
+        long cropMs = afterCropMs - afterReadbackMs;
+        long saveMs = afterSaveMs - afterCropMs;
+        MainFile.Logger.Info($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] ({paddedCardNumber}/{paddedTotalCards}, {progressPercent:F1}%) Rendered card '{model.Id}' ({usedRect.Size}) to '{absolutePath}' [setup={setupMs}ms wait={waitMs}ms readback={readbackMs}ms crop={cropMs}ms save={saveMs}ms total={afterSaveMs}ms].");
     }
 
     // CardModel.Portrait loads from the runtime texture atlas (e.g. 250x190 for Bash), which is
