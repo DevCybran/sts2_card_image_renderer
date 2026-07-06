@@ -105,7 +105,7 @@ public static class CardRenderer
     // well beyond NCard.defaultSize. Rather than hand-tracking every such element's offset, we
     // render into a generously oversized transparent viewport and let Image.GetUsedRect() (Godot's
     // own non-transparent-pixel bounding box, used for sprite trimming) tell us the real footprint.
-    private const float OversizeFactor = 3f;
+    private const float OversizeFactor = 1.5f;
 
     private static (SubViewport, NCard) CreateRenderRig()
     {
